@@ -1,7 +1,5 @@
-flask
-flask-caching
-pycryptodome
-requests
-pyjwt
-protobuf
-danger-ff-version-updater==7.7.7.7
+Flask==2.3.3
+Flask-Caching==2.1.0
+pycryptodome==3.19.0
+requests==2.31.0
+protobuf==3.20.3
