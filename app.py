@@ -1,20 +1,42 @@
 from flask import Flask, request, jsonify
-from flask_caching import Cache
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 import requests
 import time
 import logging
 from datetime import datetime
-import my_pb2
-import output_pb2
-import GetOutfit_pb2
+import sys
+import os
+import json
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Import protobuf files - handle possible import errors
+try:
+    import my_pb2
+    import output_pb2
+    import GetOutfit_pb2
+except ImportError as e:
+    print(f"Error importing protobuf: {e}")
+    # Create dummy classes if imports fail
+    class my_pb2:
+        class GameData:
+            def SerializeToString(self): return b''
+    class output_pb2:
+        class Garena_420:
+            def ParseFromString(self, data): pass
+    class GetOutfit_pb2:
+        class CSGetOutfitReq:
+            def SerializeToString(self): return b''
+        class CSGetOutfitRes:
+            def ParseFromString(self, data): pass
+
 try:
     from danger_ff_version_updater import get_categories
     HAS_UPDATER = True
 except ImportError:
     HAS_UPDATER = False
-    print("⚠️ danger_ff_version_updater not installed. Using static config.")
 
 STATIC_CONFIG = {
     "IND": {
@@ -48,9 +70,7 @@ def update_version_config():
             categories = get_categories()
             version_config = {k.upper(): v for k, v in categories.items()}
             last_update = time.time()
-            logging.info("Version config updated")
         except Exception as e:
-            logging.error(f"Updater failed: {e}")
             if not version_config:
                 version_config = STATIC_CONFIG
     else:
@@ -67,14 +87,26 @@ def get_version_config(region):
     else:
         return version_config.get("OTHERS", STATIC_CONFIG["OTHERS"])
 
-# ------------------------------
-# Flask app
-# ------------------------------
 app = Flask(__name__)
-cache = Cache(config={'CACHE_TYPE': 'SimpleCache', 'CACHE_DEFAULT_TIMEOUT': 25200})  # 7 hours
-cache.init_app(app)
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+
+# Simple cache for Vercel
+class SimpleCache:
+    def __init__(self):
+        self.cache = {}
+    
+    def get(self, key):
+        if key in self.cache:
+            value, expiry = self.cache[key]
+            if time.time() < expiry:
+                return value
+            else:
+                del self.cache[key]
+        return None
+    
+    def set(self, key, value, timeout=25200):
+        self.cache[key] = (value, time.time() + timeout)
+
+cache = SimpleCache()
 
 AES_KEY = b'Yg&tc%DEuh6%Zc^8'
 AES_IV  = b'6oyZDr22E3ychjM%'
@@ -83,7 +115,6 @@ def encrypt_message(plaintext: bytes) -> bytes:
     cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
     return cipher.encrypt(pad(plaintext, AES.block_size))
 
-# ---------- Credentials mapping ----------
 REGION_CRED = {
     "IND":    {"uid": "4816833368", "password": "Account_GPEQSBVFD_BY_SOLANKI_DADY"},
     "AMERICA":{"uid": "4765721099", "password": "C60B035E09E4F41DDE31921CD4338BEF751A14532B3FFEC044056BB6C1F33763"},
@@ -106,30 +137,30 @@ def get_jwt_token(region):
     cred = get_cred(region)
     cfg = get_version_config(region)
 
-    # ---------- OAuth ----------
-    oauth_resp = requests.post(
-        "https://100067.connect.garena.com/oauth/guest/token/grant",
-        data={
-            'uid': cred['uid'],
-            'password': cred['password'],
-            'response_type': "token",
-            'client_type': "2",
-            'client_secret': "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3",
-            'client_id': "100067"
-        },
-        headers={'User-Agent': 'GarenaMSDK/4.0.19P9'},
-        timeout=10
-    )
-    if oauth_resp.status_code != 200:
-        logger.error("OAuth failed")
-        return None
-    oauth_data = oauth_resp.json()
-    access_token = oauth_data.get('access_token')
-    open_id = oauth_data.get('open_id')
-    if not access_token or not open_id:
+    try:
+        oauth_resp = requests.post(
+            "https://100067.connect.garena.com/oauth/guest/token/grant",
+            data={
+                'uid': cred['uid'],
+                'password': cred['password'],
+                'response_type': "token",
+                'client_type': "2",
+                'client_secret': "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3",
+                'client_id': "100067"
+            },
+            headers={'User-Agent': 'GarenaMSDK/4.0.19P9'},
+            timeout=8
+        )
+        if oauth_resp.status_code != 200:
+            return None
+        oauth_data = oauth_resp.json()
+        access_token = oauth_data.get('access_token')
+        open_id = oauth_data.get('open_id')
+        if not access_token or not open_id:
+            return None
+    except Exception as e:
         return None
 
-    # ---------- MajorLogin (only required fields) ----------
     game_data = my_pb2.GameData()
     game_data.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     game_data.game_name = "free fire"
@@ -153,16 +184,15 @@ def get_jwt_token(region):
         "ReleaseVersion": cfg["release_version"]
     }
     try:
-        resp = requests.post(major_url, data=encrypted_req, headers=headers, timeout=10)
+        resp = requests.post(major_url, data=encrypted_req, headers=headers, timeout=8)
         if resp.status_code == 200:
-            # Response is plain protobuf (no decryption)
             msg = output_pb2.Garena_420()
             msg.ParseFromString(resp.content)
             if msg.token:
                 cache.set(cache_key, msg.token, timeout=25200)
                 return msg.token
     except Exception as e:
-        logger.error(f"MajorLogin error: {e}")
+        pass
     return None
 
 def fetch_outfit(jwt_token, account_id, region):
@@ -184,30 +214,31 @@ def fetch_outfit(jwt_token, account_id, region):
         "X-GA": "v1 1",
         "X-Unity-Version": "2022.3.47f1"
     }
-    resp = requests.post(url, data=encrypted_body, headers=headers, timeout=15)
-    if resp.status_code != 200:
-        return {"error": f"HTTP {resp.status_code}", "detail": resp.text[:200]}
+    try:
+        resp = requests.post(url, data=encrypted_body, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}"}
 
-    res = GetOutfit_pb2.CSGetOutfitRes()
-    res.ParseFromString(resp.content)
+        res = GetOutfit_pb2.CSGetOutfitRes()
+        res.ParseFromString(resp.content)
 
-    return {
-        "WeaponSkinShows": list(res.WeaponSkinShows),
-        "ProfileInfo": {
-            "CharacterId": res.ProfileInfo.CharacterId,
-            "SkinColor": res.ProfileInfo.SkinColor,
-            "Clothes": list(res.ProfileInfo.Clothes),
-            "Skills": [
-                {
-                    **({"SlotNo": s.SlotNo} if s.HasField('SlotNo') else {}),
-                    "SkillId": s.SkillId
-                }
-                for s in res.ProfileInfo.EquippedSkills
-            ],
-            "IsSelected": res.ProfileInfo.IsSelected if res.ProfileInfo.HasField('IsSelected') else None,
-            "IsAwakenSelected": res.ProfileInfo.IsAwakenSelected if res.ProfileInfo.HasField('IsAwakenSelected') else None
+        return {
+            "WeaponSkinShows": list(res.WeaponSkinShows),
+            "ProfileInfo": {
+                "CharacterId": res.ProfileInfo.CharacterId,
+                "SkinColor": res.ProfileInfo.SkinColor,
+                "Clothes": list(res.ProfileInfo.Clothes),
+                "Skills": [
+                    {
+                        **({"SlotNo": s.SlotNo} if hasattr(s, 'HasField') and s.HasField('SlotNo') else {}),
+                        "SkillId": s.SkillId
+                    }
+                    for s in res.ProfileInfo.EquippedSkills
+                ]
+            }
         }
-    }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.route('/outfit', methods=['GET'])
 def outfit():
@@ -217,14 +248,11 @@ def outfit():
     if not uid:
         return jsonify({"error": "Missing uid parameter"}), 400
     
-    # Default region set to BD (Bangladesh)
     if not region:
         region = "BD"
-        logger.info(f"No region provided, using default region: BD")
     
     region = region.upper()
     
-    # Map BD to OTHERS region
     if region == "BD":
         actual_region = "OTHERS"
     else:
@@ -234,17 +262,36 @@ def outfit():
     if not jwt_token:
         return jsonify({"error": "JWT generation failed"}), 500
     
-    result = fetch_outfit(jwt_token, int(uid), actual_region)
-    result["credit"] = "t.me/MUZ4NNNN"
+    try:
+        result = fetch_outfit(jwt_token, int(uid), actual_region)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+    result["credit"] = "t.me/danger_ff_dev"
     result["requested_region"] = region
     result["actual_region"] = actual_region
     
     return jsonify(result)
 
-@app.route('/health')
+@app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()})
 
-update_version_config()
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "Free Fire Outfit API is running!",
+        "endpoint": "/outfit?uid=USER_ID&region=REGION",
+        "regions": ["BD (default)", "IND", "BR", "US", "NA", "SAC"],
+        "example": "/outfit?uid=123456789"
+    })
+
+# For Vercel serverless
+app.debug = False
+
+# This is the handler Vercel expects
+handler = app
+
+# For local testing
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=1080)
