@@ -1,5 +1,7 @@
-Flask==2.3.3
-flask-caching==2.1.0
-pycryptodome==3.19.0
-requests==2.31.0
-protobuf==4.25.0
+flask
+flask-caching
+pycryptodome
+requests
+pyjwt
+protobuf
+danger-ff-version-updater==7.7.7.7
