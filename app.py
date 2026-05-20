@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify
-from flask_caching import Cache
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 import requests
@@ -9,20 +8,15 @@ from datetime import datetime
 import sys
 import os
 
-# Add current directory to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Import protobuf files
 import my_pb2
 import output_pb2
 import GetOutfit_pb2
 
-try:
-    from danger_ff_version_updater import get_categories
-    HAS_UPDATER = True
-except ImportError:
-    HAS_UPDATER = False
-    print("⚠️ danger_ff_version_updater not installed. Using static config.")
-
+# Static config only (no updater)
 STATIC_CONFIG = {
     "IND": {
         "client_url": "client.ind.freefiremobile.com",
@@ -44,42 +38,17 @@ STATIC_CONFIG = {
     }
 }
 
-version_config = {}
-last_update = 0
-UPDATE_INTERVAL = 24 * 3600
-
-def update_version_config():
-    global version_config, last_update
-    if HAS_UPDATER:
-        try:
-            categories = get_categories()
-            version_config = {k.upper(): v for k, v in categories.items()}
-            last_update = time.time()
-            logging.info("Version config updated")
-        except Exception as e:
-            logging.error(f"Updater failed: {e}")
-            if not version_config:
-                version_config = STATIC_CONFIG
-    else:
-        version_config = STATIC_CONFIG
-
 def get_version_config(region):
-    global version_config, last_update
-    if time.time() - last_update > UPDATE_INTERVAL:
-        update_version_config()
     if region == "IND":
-        return version_config.get("IND", STATIC_CONFIG["IND"])
+        return STATIC_CONFIG["IND"]
     elif region in ["BR", "US", "NA", "SAC"]:
-        return version_config.get("AMERICA", STATIC_CONFIG["AMERICA"])
+        return STATIC_CONFIG["AMERICA"]
     else:
-        return version_config.get("OTHERS", STATIC_CONFIG["OTHERS"])
+        return STATIC_CONFIG["OTHERS"]
 
-# ------------------------------
-# Flask app
-# ------------------------------
 app = Flask(__name__)
 
-# Simple in-memory cache for Vercel (Vercel doesn't support Flask-Caching well)
+# Simple cache for Vercel
 class SimpleCache:
     def __init__(self):
         self.cache = {}
@@ -98,9 +67,6 @@ class SimpleCache:
 
 cache = SimpleCache()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 AES_KEY = b'Yg&tc%DEuh6%Zc^8'
 AES_IV  = b'6oyZDr22E3ychjM%'
 
@@ -108,10 +74,9 @@ def encrypt_message(plaintext: bytes) -> bytes:
     cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
     return cipher.encrypt(pad(plaintext, AES.block_size))
 
-# ---------- Credentials mapping ----------
 REGION_CRED = {
     "IND":    {"uid": "4816833368", "password": "Account_GPEQSBVFD_BY_SOLANKI_DADY"},
-    "AMERICA":{"uid": "4765721099", "password": "C60B035E09E4F41DDE31921CD4338BEF751A14532B3FFEC044056BB6C1F33763"},
+    "AMERICA": {"uid": "4765721099", "password": "C60B035E09E4F41DDE31921CD4338BEF751A14532B3FFEC044056BB6C1F33763"},
     "OTHERS": {"uid": "4828310793", "password": "02B6697C482937FFCE91B1A2021CE89FB06DADC2F0B26806769B891ACD3A5B6C"}
 }
 
@@ -131,7 +96,6 @@ def get_jwt_token(region):
     cred = get_cred(region)
     cfg = get_version_config(region)
 
-    # ---------- OAuth ----------
     try:
         oauth_resp = requests.post(
             "https://100067.connect.garena.com/oauth/guest/token/grant",
@@ -144,10 +108,9 @@ def get_jwt_token(region):
                 'client_id': "100067"
             },
             headers={'User-Agent': 'GarenaMSDK/4.0.19P9'},
-            timeout=10
+            timeout=8
         )
         if oauth_resp.status_code != 200:
-            logger.error("OAuth failed")
             return None
         oauth_data = oauth_resp.json()
         access_token = oauth_data.get('access_token')
@@ -155,10 +118,8 @@ def get_jwt_token(region):
         if not access_token or not open_id:
             return None
     except Exception as e:
-        logger.error(f"OAuth error: {e}")
         return None
 
-    # ---------- MajorLogin (only required fields) ----------
     game_data = my_pb2.GameData()
     game_data.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     game_data.game_name = "free fire"
@@ -182,16 +143,15 @@ def get_jwt_token(region):
         "ReleaseVersion": cfg["release_version"]
     }
     try:
-        resp = requests.post(major_url, data=encrypted_req, headers=headers, timeout=10)
+        resp = requests.post(major_url, data=encrypted_req, headers=headers, timeout=8)
         if resp.status_code == 200:
-            # Response is plain protobuf (no decryption)
             msg = output_pb2.Garena_420()
             msg.ParseFromString(resp.content)
             if msg.token:
                 cache.set(cache_key, msg.token, timeout=25200)
                 return msg.token
     except Exception as e:
-        logger.error(f"MajorLogin error: {e}")
+        pass
     return None
 
 def fetch_outfit(jwt_token, account_id, region):
@@ -214,9 +174,9 @@ def fetch_outfit(jwt_token, account_id, region):
         "X-Unity-Version": "2022.3.47f1"
     }
     try:
-        resp = requests.post(url, data=encrypted_body, headers=headers, timeout=15)
+        resp = requests.post(url, data=encrypted_body, headers=headers, timeout=10)
         if resp.status_code != 200:
-            return {"error": f"HTTP {resp.status_code}", "detail": resp.text[:200]}
+            return {"error": f"HTTP {resp.status_code}"}
 
         res = GetOutfit_pb2.CSGetOutfitRes()
         res.ParseFromString(resp.content)
@@ -229,17 +189,14 @@ def fetch_outfit(jwt_token, account_id, region):
                 "Clothes": list(res.ProfileInfo.Clothes),
                 "Skills": [
                     {
-                        **({"SlotNo": s.SlotNo} if s.HasField('SlotNo') else {}),
                         "SkillId": s.SkillId
                     }
                     for s in res.ProfileInfo.EquippedSkills
-                ],
-                "IsSelected": res.ProfileInfo.IsSelected if res.ProfileInfo.HasField('IsSelected') else None,
-                "IsAwakenSelected": res.ProfileInfo.IsAwakenSelected if res.ProfileInfo.HasField('IsAwakenSelected') else None
+                ]
             }
         }
     except Exception as e:
-        return {"error": f"Fetch outfit failed: {str(e)}"}
+        return {"error": str(e)}
 
 @app.route('/outfit', methods=['GET'])
 def outfit():
@@ -249,14 +206,11 @@ def outfit():
     if not uid:
         return jsonify({"error": "Missing uid parameter"}), 400
     
-    # Default region set to BD (Bangladesh)
     if not region:
         region = "BD"
-        logger.info(f"No region provided, using default region: BD")
     
     region = region.upper()
     
-    # Map BD to OTHERS region
     if region == "BD":
         actual_region = "OTHERS"
     else:
@@ -266,7 +220,11 @@ def outfit():
     if not jwt_token:
         return jsonify({"error": "JWT generation failed"}), 500
     
-    result = fetch_outfit(jwt_token, int(uid), actual_region)
+    try:
+        result = fetch_outfit(jwt_token, int(uid), actual_region)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
     result["credit"] = "t.me/danger_ff_dev"
     result["requested_region"] = region
     result["actual_region"] = actual_region
@@ -275,20 +233,21 @@ def outfit():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "message": "Server is running on Vercel"})
+    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()})
 
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
-        "message": "Free Fire Outfit API",
-        "endpoints": {
-            "/outfit": "GET - Get outfit info (uid required, region optional - defaults to BD)",
-            "/health": "GET - Health check"
-        },
+        "message": "Free Fire Outfit API is running!",
+        "endpoint": "/outfit?uid=USER_ID&region=REGION",
+        "regions": ["BD (default)", "IND", "BR", "US", "NA", "SAC"],
         "example": "/outfit?uid=123456789"
     })
 
-# Vercel requires this handler
+# For Vercel serverless
+app.debug = False
+
+# This is the handler Vercel expects
 handler = app
 
 # For local testing
