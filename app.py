@@ -7,16 +7,37 @@ import logging
 from datetime import datetime
 import sys
 import os
+import json
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Import protobuf files
-import my_pb2
-import output_pb2
-import GetOutfit_pb2
+# Import protobuf files - handle possible import errors
+try:
+    import my_pb2
+    import output_pb2
+    import GetOutfit_pb2
+except ImportError as e:
+    print(f"Error importing protobuf: {e}")
+    # Create dummy classes if imports fail
+    class my_pb2:
+        class GameData:
+            def SerializeToString(self): return b''
+    class output_pb2:
+        class Garena_420:
+            def ParseFromString(self, data): pass
+    class GetOutfit_pb2:
+        class CSGetOutfitReq:
+            def SerializeToString(self): return b''
+        class CSGetOutfitRes:
+            def ParseFromString(self, data): pass
 
-# Static config only (no updater)
+try:
+    from danger_ff_version_updater import get_categories
+    HAS_UPDATER = True
+except ImportError:
+    HAS_UPDATER = False
+
 STATIC_CONFIG = {
     "IND": {
         "client_url": "client.ind.freefiremobile.com",
@@ -38,13 +59,33 @@ STATIC_CONFIG = {
     }
 }
 
-def get_version_config(region):
-    if region == "IND":
-        return STATIC_CONFIG["IND"]
-    elif region in ["BR", "US", "NA", "SAC"]:
-        return STATIC_CONFIG["AMERICA"]
+version_config = {}
+last_update = 0
+UPDATE_INTERVAL = 24 * 3600
+
+def update_version_config():
+    global version_config, last_update
+    if HAS_UPDATER:
+        try:
+            categories = get_categories()
+            version_config = {k.upper(): v for k, v in categories.items()}
+            last_update = time.time()
+        except Exception as e:
+            if not version_config:
+                version_config = STATIC_CONFIG
     else:
-        return STATIC_CONFIG["OTHERS"]
+        version_config = STATIC_CONFIG
+
+def get_version_config(region):
+    global version_config, last_update
+    if time.time() - last_update > UPDATE_INTERVAL:
+        update_version_config()
+    if region == "IND":
+        return version_config.get("IND", STATIC_CONFIG["IND"])
+    elif region in ["BR", "US", "NA", "SAC"]:
+        return version_config.get("AMERICA", STATIC_CONFIG["AMERICA"])
+    else:
+        return version_config.get("OTHERS", STATIC_CONFIG["OTHERS"])
 
 app = Flask(__name__)
 
@@ -76,7 +117,7 @@ def encrypt_message(plaintext: bytes) -> bytes:
 
 REGION_CRED = {
     "IND":    {"uid": "4816833368", "password": "Account_GPEQSBVFD_BY_SOLANKI_DADY"},
-    "AMERICA": {"uid": "4765721099", "password": "C60B035E09E4F41DDE31921CD4338BEF751A14532B3FFEC044056BB6C1F33763"},
+    "AMERICA":{"uid": "4765721099", "password": "C60B035E09E4F41DDE31921CD4338BEF751A14532B3FFEC044056BB6C1F33763"},
     "OTHERS": {"uid": "4828310793", "password": "02B6697C482937FFCE91B1A2021CE89FB06DADC2F0B26806769B891ACD3A5B6C"}
 }
 
@@ -189,6 +230,7 @@ def fetch_outfit(jwt_token, account_id, region):
                 "Clothes": list(res.ProfileInfo.Clothes),
                 "Skills": [
                     {
+                        **({"SlotNo": s.SlotNo} if hasattr(s, 'HasField') and s.HasField('SlotNo') else {}),
                         "SkillId": s.SkillId
                     }
                     for s in res.ProfileInfo.EquippedSkills
