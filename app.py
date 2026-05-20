@@ -9,7 +9,6 @@ from datetime import datetime
 import my_pb2
 import output_pb2
 import GetOutfit_pb2
-
 try:
     from danger_ff_version_updater import get_categories
     HAS_UPDATER = True
@@ -86,7 +85,7 @@ def encrypt_message(plaintext: bytes) -> bytes:
 
 # ---------- Credentials mapping ----------
 REGION_CRED = {
-    "IND":    {"uid": "4847441340", "password": "A3CE5E4D822B980F5722C0DA4C572184E456B076135C87DE37B328EEDB27EEA6"},
+    "IND":    {"uid": "4816833368", "password": "Account_GPEQSBVFD_BY_SOLANKI_DADY"},
     "AMERICA":{"uid": "4765721099", "password": "C60B035E09E4F41DDE31921CD4338BEF751A14532B3FFEC044056BB6C1F33763"},
     "OTHERS": {"uid": "4828310793", "password": "02B6697C482937FFCE91B1A2021CE89FB06DADC2F0B26806769B891ACD3A5B6C"}
 }
@@ -213,47 +212,39 @@ def fetch_outfit(jwt_token, account_id, region):
 @app.route('/outfit', methods=['GET'])
 def outfit():
     uid = request.args.get('uid')
+    region = request.args.get('region')
     
     if not uid:
         return jsonify({"error": "Missing uid parameter"}), 400
     
-    # Try all regions in order
-    regions_to_try = ["IND", "AMERICA", "OTHERS"]
+    # Default region set to BD (Bangladesh)
+    if not region:
+        region = "BD"
+        logger.info(f"No region provided, using default region: BD")
     
-    for region in regions_to_try:
-        logger.info(f"Trying region {region} for UID: {uid}")
-        
-        # Get JWT token for this region
-        jwt_token = get_jwt_token(region)
-        if not jwt_token:
-            logger.warning(f"JWT generation failed for region {region}")
-            continue
-        
-        # Fetch outfit data
-        result = fetch_outfit(jwt_token, int(uid), region)
-        
-        # Check if we got valid data (not an error response)
-        if "error" not in result:
-            result["region_used"] = region
-            result["credit"] = "t.me/only1piecs"
-            logger.info(f"Successfully fetched data for UID {uid} using region {region}")
-            return jsonify(result)
-        else:
-            logger.warning(f"Failed for region {region}: {result.get('error')}")
-            continue
+    region = region.upper()
     
-    # If all regions failed
-    return jsonify({
-        "error": "Failed to fetch outfit data from any region",
-        "credit": "t.me/only1piesc"
-    }), 500
+    # Map BD to OTHERS region
+    if region == "BD":
+        actual_region = "OTHERS"
+    else:
+        actual_region = region
+    
+    jwt_token = get_jwt_token(actual_region)
+    if not jwt_token:
+        return jsonify({"error": "JWT generation failed"}), 500
+    
+    result = fetch_outfit(jwt_token, int(uid), actual_region)
+    result["credit"] = "t.me/MUZ4NNNN"
+    result["requested_region"] = region
+    result["actual_region"] = actual_region
+    
+    return jsonify(result)
 
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
 
-# Update config on startup
 update_version_config()
-
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=1080)
