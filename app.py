@@ -6,9 +6,16 @@ import requests
 import time
 import logging
 from datetime import datetime
+import sys
+import os
+
+# Add current directory to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import my_pb2
 import output_pb2
 import GetOutfit_pb2
+
 try:
     from danger_ff_version_updater import get_categories
     HAS_UPDATER = True
@@ -71,8 +78,26 @@ def get_version_config(region):
 # Flask app
 # ------------------------------
 app = Flask(__name__)
-cache = Cache(config={'CACHE_TYPE': 'SimpleCache', 'CACHE_DEFAULT_TIMEOUT': 25200})  # 7 hours
-cache.init_app(app)
+
+# Simple in-memory cache for Vercel (Vercel doesn't support Flask-Caching well)
+class SimpleCache:
+    def __init__(self):
+        self.cache = {}
+    
+    def get(self, key):
+        if key in self.cache:
+            value, expiry = self.cache[key]
+            if time.time() < expiry:
+                return value
+            else:
+                del self.cache[key]
+        return None
+    
+    def set(self, key, value, timeout=25200):
+        self.cache[key] = (value, time.time() + timeout)
+
+cache = SimpleCache()
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -107,26 +132,30 @@ def get_jwt_token(region):
     cfg = get_version_config(region)
 
     # ---------- OAuth ----------
-    oauth_resp = requests.post(
-        "https://100067.connect.garena.com/oauth/guest/token/grant",
-        data={
-            'uid': cred['uid'],
-            'password': cred['password'],
-            'response_type': "token",
-            'client_type': "2",
-            'client_secret': "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3",
-            'client_id': "100067"
-        },
-        headers={'User-Agent': 'GarenaMSDK/4.0.19P9'},
-        timeout=10
-    )
-    if oauth_resp.status_code != 200:
-        logger.error("OAuth failed")
-        return None
-    oauth_data = oauth_resp.json()
-    access_token = oauth_data.get('access_token')
-    open_id = oauth_data.get('open_id')
-    if not access_token or not open_id:
+    try:
+        oauth_resp = requests.post(
+            "https://100067.connect.garena.com/oauth/guest/token/grant",
+            data={
+                'uid': cred['uid'],
+                'password': cred['password'],
+                'response_type': "token",
+                'client_type': "2",
+                'client_secret': "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3",
+                'client_id': "100067"
+            },
+            headers={'User-Agent': 'GarenaMSDK/4.0.19P9'},
+            timeout=10
+        )
+        if oauth_resp.status_code != 200:
+            logger.error("OAuth failed")
+            return None
+        oauth_data = oauth_resp.json()
+        access_token = oauth_data.get('access_token')
+        open_id = oauth_data.get('open_id')
+        if not access_token or not open_id:
+            return None
+    except Exception as e:
+        logger.error(f"OAuth error: {e}")
         return None
 
     # ---------- MajorLogin (only required fields) ----------
@@ -184,30 +213,33 @@ def fetch_outfit(jwt_token, account_id, region):
         "X-GA": "v1 1",
         "X-Unity-Version": "2022.3.47f1"
     }
-    resp = requests.post(url, data=encrypted_body, headers=headers, timeout=15)
-    if resp.status_code != 200:
-        return {"error": f"HTTP {resp.status_code}", "detail": resp.text[:200]}
+    try:
+        resp = requests.post(url, data=encrypted_body, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}", "detail": resp.text[:200]}
 
-    res = GetOutfit_pb2.CSGetOutfitRes()
-    res.ParseFromString(resp.content)
+        res = GetOutfit_pb2.CSGetOutfitRes()
+        res.ParseFromString(resp.content)
 
-    return {
-        "WeaponSkinShows": list(res.WeaponSkinShows),
-        "ProfileInfo": {
-            "CharacterId": res.ProfileInfo.CharacterId,
-            "SkinColor": res.ProfileInfo.SkinColor,
-            "Clothes": list(res.ProfileInfo.Clothes),
-            "Skills": [
-                {
-                    **({"SlotNo": s.SlotNo} if s.HasField('SlotNo') else {}),
-                    "SkillId": s.SkillId
-                }
-                for s in res.ProfileInfo.EquippedSkills
-            ],
-            "IsSelected": res.ProfileInfo.IsSelected if res.ProfileInfo.HasField('IsSelected') else None,
-            "IsAwakenSelected": res.ProfileInfo.IsAwakenSelected if res.ProfileInfo.HasField('IsAwakenSelected') else None
+        return {
+            "WeaponSkinShows": list(res.WeaponSkinShows),
+            "ProfileInfo": {
+                "CharacterId": res.ProfileInfo.CharacterId,
+                "SkinColor": res.ProfileInfo.SkinColor,
+                "Clothes": list(res.ProfileInfo.Clothes),
+                "Skills": [
+                    {
+                        **({"SlotNo": s.SlotNo} if s.HasField('SlotNo') else {}),
+                        "SkillId": s.SkillId
+                    }
+                    for s in res.ProfileInfo.EquippedSkills
+                ],
+                "IsSelected": res.ProfileInfo.IsSelected if res.ProfileInfo.HasField('IsSelected') else None,
+                "IsAwakenSelected": res.ProfileInfo.IsAwakenSelected if res.ProfileInfo.HasField('IsAwakenSelected') else None
+            }
         }
-    }
+    except Exception as e:
+        return {"error": f"Fetch outfit failed: {str(e)}"}
 
 @app.route('/outfit', methods=['GET'])
 def outfit():
@@ -235,16 +267,30 @@ def outfit():
         return jsonify({"error": "JWT generation failed"}), 500
     
     result = fetch_outfit(jwt_token, int(uid), actual_region)
-    result["credit"] = "t.me/MUZ4NNNN"
+    result["credit"] = "t.me/danger_ff_dev"
     result["requested_region"] = region
     result["actual_region"] = actual_region
     
     return jsonify(result)
 
-@app.route('/health')
+@app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "message": "Server is running on Vercel"})
 
-update_version_config()
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "Free Fire Outfit API",
+        "endpoints": {
+            "/outfit": "GET - Get outfit info (uid required, region optional - defaults to BD)",
+            "/health": "GET - Health check"
+        },
+        "example": "/outfit?uid=123456789"
+    })
+
+# Vercel requires this handler
+handler = app
+
+# For local testing
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=1080)
